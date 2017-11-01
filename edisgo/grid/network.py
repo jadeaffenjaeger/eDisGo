@@ -105,6 +105,22 @@ class Network:
                 except:
                     pass
 
+        # modify structure of config data
+        confic_dict['data']['peakload_consumption_ratio'] = {
+            'residential': confic_dict['data'][
+                'residential_peakload_consumption'],
+            'retail': confic_dict['data'][
+                'retail_peakload_consumption'],
+            'industrial': confic_dict['data'][
+                'residential_peakload_consumption'],
+            'agricultural': confic_dict['data'][
+                'agricultural_peakload_consumption']}
+
+        del (confic_dict['data']['residential_peakload_consumption'])
+        del (confic_dict['data']['retail_peakload_consumption'])
+        del (confic_dict['data']['industrial_peakload_consumption'])
+        del (confic_dict['data']['agricultural_peakload_consumption'])
+
         return confic_dict
 
     def _load_equipment_data(self):
@@ -404,9 +420,9 @@ class Scenario:
 
         if isinstance(power_flow, str):
             if power_flow != 'worst-case':
-                raise ValueError("{} is not a valid specification for type of "
-                                 "power flow analysis .Try 'worst-case'".format(
-                    power_flow))
+                raise ValueError(
+                    "{} is not a valid specification for type of power flow"
+                    "analysis. Try 'worst-case'".format(power_flow))
             else:
                 timeindex = pd.date_range('12/4/2011', periods=1, freq='H')
         elif isinstance(power_flow, tuple):
@@ -800,6 +816,7 @@ class Results:
         self._i_res = None
         self._equipment_changes = pd.DataFrame()
         self._grid_expansion_costs = None
+        self._unresolved_issues = {}
 
     @property
     def pfa_p(self):
@@ -1023,6 +1040,43 @@ class Results:
     @grid_expansion_costs.setter
     def grid_expansion_costs(self, total_costs):
         self._grid_expansion_costs = total_costs
+
+    @property
+    def unresolved_issues(self):
+        """
+        Holds lines and nodes where over-loading or over-voltage issues
+        could not be solved in grid reinforcement.
+
+        In case over-loading or over-voltage issues could not be solved
+        after maximum number of iterations, grid reinforcement is not
+        aborted but grid expansion costs are still calculated and unresolved
+        issues listed here.
+
+        Parameters
+        ----------
+        issues : Dictionary
+
+            Dictionary of critical lines/stations with relative over-loading
+            and critical nodes with voltage deviation in p.u.. Format:
+                {crit_line_1: rel_overloading_1, ...,
+                 crit_line_n: rel_overloading_n,
+                 crit_node_1: v_mag_pu_node_1, ...,
+                 crit_node_n: v_mag_pu_node_n}
+            Provide this if you want to set unresolved_issues. For retrieval
+            of unresolved issues do not pass an argument.
+
+        Returns
+        -------
+        Dictionary
+            Dictionary of critical lines/stations with relative over-loading
+            and critical nodes with voltage deviation in p.u.
+
+        """
+        return self._unresolved_issues
+
+    @unresolved_issues.setter
+    def unresolved_issues(self, issues):
+        self._unresolved_issues = issues
 
     def s_res(self, components=None):
         """

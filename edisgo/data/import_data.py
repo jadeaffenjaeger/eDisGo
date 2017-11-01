@@ -2,6 +2,8 @@ from ..grid.components import Load, Generator, MVDisconnectingPoint, BranchTee,\
     MVStation, Line, Transformer, LVStation
 from ..grid.grids import MVGrid, LVGrid
 from ..grid.connect import connect_mv_generators, connect_lv_generators
+from ..grid.tools import select_cable
+from ..tools.geo import proj2equidistant
 
 from egoio.db_tables import model_draft, supply
 from egoio.tools.db import connection
@@ -22,6 +24,7 @@ if not 'READTHEDOCS' in os.environ:
     from ding0.core.network.stations import LVStationDing0
     from ding0.core.network.grids import CircuitBreakerDing0
     from ding0.core.structure.regions import LVLoadAreaCentreDing0
+    from shapely.ops import transform
 
 import logging
 logger = logging.getLogger('edisgo')
@@ -252,6 +255,12 @@ def _build_mv_grid(ding0_grid, network):
         aggregated = {}
         aggr_stations = []
 
+        # create empty DF for imported agg. generators
+        network.dingo_import_data = pd.DataFrame(columns=('id',
+                                                          'capacity',
+                                                          'agg_geno')
+                                                 )
+
     # Create list of load instances and add these to grid's graph
     loads = {_: Load(
         id=_.id_db,
@@ -308,15 +317,16 @@ def _build_mv_grid(ding0_grid, network):
         transformers=[Transformer(
             mv_grid=grid,
             grid=grid,
-            id='_'.join(['MV_station',
+            id='_'.join(['MVStation',
                          str(ding0_grid.station().id_db),
                          'transformer',
                          str(count)]),
             geom=ding0_grid.station().geo_data,
             voltage_op=_.v_level,
             type=pd.Series(dict(
-                s=_.s_max_a, x=_.x, r=_.r)))
-            for (count, _) in enumerate(ding0_grid.station().transformers())])
+                S_nom=_.s_max_a, X=_.x, R=_.r)))
+            for (count, _) in enumerate(
+                ding0_grid.station().transformers(), 1)])
     grid.graph.add_node(mv_station, type='mv_station')
 
     # Merge node above defined above to a single dict
@@ -505,7 +515,7 @@ def _determine_aggregated_nodes(la_centers):
             aggr_stations.append(_.lv_grid.station())
 
         # add elements to lists
-        aggregated.update({repr(la_center): aggr})
+        aggregated.update({la_center.id_db: aggr})
 
 
     return aggregated, aggr_stations, dingo_import_data
@@ -539,14 +549,14 @@ def _attach_aggregated(network, grid, aggregated, ding0_grid):
             for type, val2 in val.items():
                 for subtype, val3 in val2.items():
                     gen = Generator(
-                        id='agg-' + la_id + '-' + '_'.join([str(_) for _ in val3['ids']]),
+                        id='agg-' + str(la_id) + '-' + '_'.join([str(_) for _ in val3['ids']]),
                         nominal_capacity=val3['capacity'],
                         type=type,
                         subtype=subtype,
                         geom=grid.station.geom,
                         grid=grid,
                         v_level=4)
-                    grid.graph.add_node(gen, type='generator')
+                    grid.graph.add_node(gen, type='generator_aggr')
 
                     # backup reference of geno to LV geno list (save geno
                     # where the former LV genos are aggregated in)
@@ -555,32 +565,33 @@ def _attach_aggregated(network, grid, aggregated, ding0_grid):
                                                         gen)
 
                     # connect generator to MV station
-                    line = Line(id='line_aggr_generator_vlevel_{v_level}_'
+                    line = Line(id='line_aggr_generator_la_' + str(la_id) + '_vlevel_{v_level}_'
                                 '{subtype}'.format(
                                  v_level=v_level,
                                  subtype=subtype),
                                  type=aggr_line_type,
                                  kind='cable',
-                                 length=.5,
+                                 length=1e-3,
                                  grid=grid)
                     grid.graph.add_edge(grid.station,
                                         gen,
                                         line=line,
                                         type='line_aggr')
+
         for sector, sectoral_load in la['load'].items():
             load = Load(
                 geom=grid.station.geom,
                 consumption={sector: sectoral_load},
                 grid=grid,
-                id='_'.join(['Load_aggregated', sector, repr(grid), la_id]))
+                id='_'.join(['Load_aggregated', sector, repr(grid), str(la_id)]))
 
             grid.graph.add_node(load, type='load')
 
             # connect aggregated load to MV station
-            line = Line(id='_'.join(['line_aggr_load', sector, la_id]),
+            line = Line(id='_'.join(['line_aggr_load_la_' + str(la_id), sector, str(la_id)]),
                         type=aggr_line_type,
                         kind='cable',
-                        length=.5,
+                        length=1e-3,
                         grid=grid)
 
             grid.graph.add_edge(grid.station,
@@ -734,7 +745,8 @@ def _validate_ding0_lv_grid_import(grids, ding0_grid, lv_grid_mapping):
 
         # Check number of generators
         data_integrity[grid]['generator']['edisgo'] = len(
-            grid.graph.nodes_by_attribute('generator'))
+            grid.graph.nodes_by_attribute('generator') +
+            grid.graph.nodes_by_attribute('generator_aggr'))
         data_integrity[grid]['generator']['ding0'] = len(
             list(lv_grid_mapping[grid].generators()))
 
@@ -815,17 +827,20 @@ def _validate_load_generation(mv_grid, ding0_mv_grid):
     lv_gens = []
     [lv_gens.extend(_.graph.nodes_by_attribute('generator'))
                     for _ in mv_grid.lv_grids]
+    gens_aggr = mv_grid.graph.nodes_by_attribute('generator_aggr')
 
     generation = {}
     generation_aggr = {}
 
     # collect eDisGo cumulative generation capacity
     for gen in mv_gens + lv_gens:
-        if gen in mv_grid.graph.neighbors(mv_grid.station) and \
-            mv_grid.graph.get_edge_data(mv_grid.station,gen)['line'].length <= .5:
-            generation_aggr.setdefault(gen.type, {})
-            generation_aggr[gen.type].setdefault(gen.subtype, {'edisgo': 0})
-            generation_aggr[gen.type][gen.subtype]['edisgo'] += gen.nominal_capacity
+        generation.setdefault(gen.type, {})
+        generation[gen.type].setdefault(gen.subtype, {'edisgo': 0})
+        generation[gen.type][gen.subtype]['edisgo'] += gen.nominal_capacity
+    for gen in gens_aggr:
+        generation_aggr.setdefault(gen.type, {})
+        generation_aggr[gen.type].setdefault(gen.subtype, {'edisgo': 0})
+        generation_aggr[gen.type][gen.subtype]['edisgo'] += gen.nominal_capacity
         generation.setdefault(gen.type, {})
         generation[gen.type].setdefault(gen.subtype, {'edisgo': 0})
         generation[gen.type][gen.subtype]['edisgo'] += gen.nominal_capacity
@@ -995,6 +1010,7 @@ def _import_genos_from_oedb(network):
         generators_sqla = session.query(
             orm_re_generators.columns.id,
             orm_re_generators.columns.subst_id,
+            orm_re_generators.columns.la_id,
             orm_re_generators.columns.mvlv_subst_id,
             orm_re_generators.columns.electrical_capacity,
             orm_re_generators.columns.generation_type,
@@ -1088,13 +1104,13 @@ def _import_genos_from_oedb(network):
         cap_diff_threshold = 10 ** -4
 
         # get existing generators in MV and LV grids
-        g_mv, g_lv, g_lv_agg = _build_generator_list(network=network)
+        g_mv, g_lv, g_mv_agg = _build_generator_list(network=network)
 
         # print current capacity
         capacity_grid = 0
         capacity_grid += sum([row['obj'].nominal_capacity for id, row in g_mv.iterrows()])
         capacity_grid += sum([row['obj'].nominal_capacity for id, row in g_lv.iterrows()])
-        capacity_grid += sum([row['obj'].nominal_capacity for id, row in g_lv_agg.iterrows()])
+        capacity_grid += sum([row['obj'].nominal_capacity for id, row in g_mv_agg.iterrows()])
         logger.debug('Cumulative generator capacity (existing): {} kW'
                      .format(str(round(capacity_grid, 1)))
                      )
@@ -1135,7 +1151,7 @@ def _import_genos_from_oedb(network):
                 # check if cap=0 (this may happen if dp is buggy)
                 if row['electrical_capacity'] <= 0:
                     geno_existing.grid.graph.remove_node(geno_existing)
-                    logger.warning('Capacity of generator {} is 0, generator removed. '
+                    logger.warning('Capacity of generator {} is <=0, generator removed. '
                                    'Check your data source.'
                                    .format(repr(geno_existing))
                                    )
@@ -1320,6 +1336,11 @@ def _import_genos_from_oedb(network):
                 ids.remove(str(int(row['id'])))
                 row['agg_geno'].id = '-'.join([id[0], id[1], '_'.join(ids)])
 
+                # after removing the LV geno from agg geno, is the agg. geno empty?
+                # if yes, remove it from grid
+                if not ids:
+                    row['agg_geno'].grid.graph.remove_node(row['agg_geno'])
+
                 log_geno_count += 1
             logger.debug('{} of {} decommissioned generators in aggregated generators removed ({} kW).'
                          .format(str(log_geno_count),
@@ -1332,7 +1353,9 @@ def _import_genos_from_oedb(network):
         # Step 4: LV generators (new single units + genos in aggregated units)
         # ====================================================================
         # new genos
-        log_geno_count = log_agg_geno_count = 0
+        log_geno_count =\
+            log_agg_geno_new_count =\
+            log_agg_geno_upd_count = 0
 
         # TEMP: BACKUP 1 GENO FOR TESTING
         #temp_geno = generators_lv[generators_lv.index == g_lv_existing.iloc[0]['id']]
@@ -1352,36 +1375,59 @@ def _import_genos_from_oedb(network):
         seed = int(network.config['random']['seed'])
         random.seed(a=seed)
 
+        # check if none of new generators can be allocated to an existing  LV grid
+        if not any([_ in lv_grid_dict.keys()
+                    for _ in list(generators_lv_new['mvlv_subst_id'])]):
+            logger.warning('None of the imported generators can be allocated '
+                           'to an existing LV grid. Check compatibility of grid '
+                           'and generator datasets.')
+
         # iterate over new (single unit or part of agg. unit) generators and create them
         log_geno_cap = 0
         for id, row in generators_lv_new.iterrows():
+            lv_geno_added_to_agg_geno = False
 
-            # TEMP: USE RANDOM LV GRID - DELETE IF DP COL mvlv_subst_id is fixed!
-            row['mvlv_subst_id'] = random.choice(list(lv_grid_dict.keys()))
+            # new unit is part of agg. LA (mvlv_subst_id is different from existing
+            # ones in LV grids of non-agg. load areas)
+            if (row['mvlv_subst_id'] not in lv_grid_dict.keys() and
+                    row['la_id'] and not isnan(row['la_id']) and
+                    row['mvlv_subst_id'] and not isnan(row['mvlv_subst_id'])):
 
-            # new unit is part of agg. LA -> add to dict
-            if row['mvlv_subst_id'] not in lv_grid_dict.keys():
-                # TODO: A missing mvlv_subst_id does not necessarily mean that it is a new geno
-                # TODO: It might be a bug in DP! Check!
+                # check if new unit can be added to existing agg. generator
+                # (LA id, type and subtype match) -> update existing agg. generator.
+                # Normally, this case should not occur since `subtype` of new genos
+                # is set to a new value (e.g. 'solar')
+                for _, agg_row in g_mv_agg.iterrows():
+                    if (agg_row['la_id'] == int(row['la_id']) and
+                            agg_row['obj'].type == row['generation_type'] and
+                            agg_row['obj'].subtype == row['generation_subtype']):
 
-                if row['voltage_level'] not in agg_geno_new:
-                    agg_geno_new[row['voltage_level']] = {}
-                if row['voltage_level'] not in agg_geno_new:
-                    agg_geno_new[row['voltage_level']] = {}
-                if row['generation_type'] not in agg_geno_new[row['voltage_level']]:
-                    agg_geno_new[row['voltage_level']][row['generation_type']] = {}
-                if row['generation_subtype'] not in agg_geno_new[row['voltage_level']][row['generation_type']]:
-                    agg_geno_new[row['voltage_level']][row['generation_type']]\
-                        .update({row['generation_subtype']: {'ids': [int(id)],
-                                                             'capacity': row['electrical_capacity']
-                                                             }
-                         }
-                    )
-                else:
-                    agg_geno_new[row['voltage_level']][row['generation_type']] \
-                        [row['generation_subtype']]['ids'].append(int(id))
-                    agg_geno_new[row['voltage_level']][row['generation_type']] \
-                        [row['generation_subtype']]['capacity'] += row['electrical_capacity']
+                        agg_row['obj'].nominal_capacity += row['electrical_capacity']
+                        agg_row['obj'].id += '_{}'.format(str(id))
+                        log_agg_geno_upd_count += 1
+                        lv_geno_added_to_agg_geno = True
+
+                if not lv_geno_added_to_agg_geno:
+                    la_id = int(row['la_id'])
+                    if la_id not in agg_geno_new:
+                        agg_geno_new[la_id] = {}
+                    if row['voltage_level'] not in agg_geno_new[la_id]:
+                        agg_geno_new[la_id][row['voltage_level']] = {}
+                    if row['generation_type'] not in agg_geno_new[la_id][row['voltage_level']]:
+                        agg_geno_new[la_id][row['voltage_level']][row['generation_type']] = {}
+                    if row['generation_subtype'] not in \
+                            agg_geno_new[la_id][row['voltage_level']][row['generation_type']]:
+                        agg_geno_new[la_id][row['voltage_level']][row['generation_type']]\
+                            .update({row['generation_subtype']: {'ids': [int(id)],
+                                                                 'capacity': row['electrical_capacity']
+                                                                 }
+                             }
+                        )
+                    else:
+                        agg_geno_new[la_id][row['voltage_level']][row['generation_type']] \
+                            [row['generation_subtype']]['ids'].append(int(id))
+                        agg_geno_new[la_id][row['voltage_level']][row['generation_type']] \
+                            [row['generation_subtype']]['capacity'] += row['electrical_capacity']
 
             # new generator is a single (non-aggregated) unit
             else:
@@ -1394,7 +1440,7 @@ def _import_genos_from_oedb(network):
                                 type=row['generation_type'],
                                 subtype=row['generation_subtype'],
                                 v_level=int(row['voltage_level']),
-                                geom=wkt_loads(geom))
+                                geom=wkt_loads(geom) if geom else geom)
 
                 # TEMP: REMOVE MVLV SUBST ID FOR TESTING
                 #row['mvlv_subst_id'] = None
@@ -1414,51 +1460,59 @@ def _import_genos_from_oedb(network):
         # there are new agg. generators to be created
         if agg_geno_new:
 
-            # get line type for agg. genos from existing geno
-            aggr_line_type = network.mv_grid.graph.get_edge_data(
-                network.dingo_import_data.iloc[0]['agg_geno'],
-                network.mv_grid.station)['line'].type
+            pfac_mv_gen = network.config['scenario']['pfac_mv_gen']
 
             # add aggregated generators
-            for v_level, val in agg_geno_new.items():
-                for type, val2 in val.items():
-                    for subtype, val3 in val2.items():
-                        # TODO: Add la_id of real agg. LA here!
-                        # TODO: (need additional dict top level for la_id here)
-                        gen = Generator(
-                            id='agg-' + 'LA_ID' + '-' + '_'.join([str(_) for _ in val3['ids']]),
-                            nominal_capacity=val3['capacity'],
-                            type=type,
-                            subtype=subtype,
-                            geom=network.mv_grid.station.geom,
-                            grid=network.mv_grid,
-                            v_level=4)
-                        network.mv_grid.graph.add_node(gen, type='generator')
+            for la_id, val in agg_geno_new.items():
+                for v_level, val2 in val.items():
+                    for type, val3 in val2.items():
+                        for subtype, val4 in val3.items():
+                            gen = Generator(
+                                id='agg-' + str(la_id) + '-' + '_'.join([str(_) for _ in val4['ids']]),
+                                nominal_capacity=val4['capacity'],
+                                type=type,
+                                subtype=subtype,
+                                geom=network.mv_grid.station.geom,
+                                grid=network.mv_grid,
+                                v_level=4)
 
-                        # connect generator to MV station
-                        line = Line(id='line_aggr_generator_vlevel_{v_level}_'
-                                    '{subtype}'.format(
-                                     v_level=v_level,
-                                     subtype=subtype),
-                                    type=aggr_line_type,
-                                    kind='cable',
-                                    length=.5,
-                                    grid=network.mv_grid)
+                            network.mv_grid.graph.add_node(gen, type='generator_aggr')
 
-                        network.mv_grid.graph.add_edge(network.mv_grid.station,
-                                                       gen,
-                                                       line=line,
-                                                       type='line_aggr')
+                            # select cable type
+                            line_type, line_count = select_cable(network=network,
+                                                                 level='mv',
+                                                                 apparent_power=gen.nominal_capacity /
+                                                                 pfac_mv_gen)
 
-                        log_agg_geno_count += len(val3['ids'])
-                        log_geno_cap += val3['capacity']
+                            # connect generator to MV station
+                            line = Line(id='line_aggr_generator_la_' + str(la_id) + '_vlevel_{v_level}_'
+                                        '{subtype}'.format(
+                                         v_level=v_level,
+                                         subtype=subtype),
+                                        type=line_type,
+                                        kind='cable',
+                                        quantity=line_count,
+                                        length=1e-3,
+                                        grid=network.mv_grid)
 
-        logger.debug('{} of {} new generators added ({} single units and {} '
-                     'units as aggregated generators) ({} kW).'
-                     .format(str(log_geno_count + log_agg_geno_count),
+                            network.mv_grid.graph.add_edge(network.mv_grid.station,
+                                                           gen,
+                                                           line=line,
+                                                           type='line_aggr')
+
+                            log_agg_geno_new_count += len(val4['ids'])
+                            log_geno_cap += val4['capacity']
+
+        logger.debug('{} of {} new generators added ({} single units, {} to existing '
+                     'agg. generators and {} units as new aggregated generators) '
+                     '(total: {} kW).'
+                     .format(str(log_geno_count +
+                                 log_agg_geno_new_count +
+                                 log_agg_geno_upd_count),
                              str(len(generators_lv_new)),
                              str(log_geno_count),
-                             str(log_agg_geno_count),
+                             str(log_agg_geno_upd_count),
+                             str(log_agg_geno_new_count),
                              str(round(log_geno_cap, 1))
                              )
                      )
@@ -1467,7 +1521,13 @@ def _import_genos_from_oedb(network):
         """Checks if a valid geom is available in dataset
 
         If yes, this geom will be used.
-        If not, use geom from EnergyMap for MV generators
+        If not:
+
+            * MV generators: use geom from EnergyMap.
+            * LV generators: set geom to None. It is re-set in
+                :func:`edisgo.data.import_data._check_mvlv_subst_id`
+                to MV-LV station's geom. EnergyMap's geom is not used
+                since it is more inaccurate than the station's geom.
 
         Parameters
         ----------
@@ -1493,9 +1553,9 @@ def _import_genos_from_oedb(network):
                 # check if original geom from Energy Map is available
                 if row['geom_em']:
                     geom = row['geom_em']
-                    logger.warning('Generator {} has no geom entry, EnergyMap\'s geom entry will be used.'
-                                   .format(id)
-                                   )
+                    logger.debug('Generator {} has no geom entry, EnergyMap\'s geom entry will be used.'
+                                 .format(id)
+                                 )
 
         return geom
 
@@ -1528,9 +1588,9 @@ def _import_genos_from_oedb(network):
                 # if no geom, use geom of station
                 if not generator.geom:
                     generator.geom = lv_grid.station.geom
-                    logger.warning('Generator {} has no geom entry, stations\' geom will be used.'
-                                   .format(generator.id)
-                                   )
+                    logger.debug('Generator {} has no geom entry, stations\' geom will be used.'
+                                 .format(generator.id)
+                                 )
 
                 return lv_grid
 
@@ -1579,7 +1639,8 @@ def _import_genos_from_oedb(network):
 
         capacity_grid = 0
         # MV genos
-        for geno in network.mv_grid.graph.nodes_by_attribute('generator'):
+        for geno in network.mv_grid.graph.nodes_by_attribute('generator') +\
+            network.mv_grid.graph.nodes_by_attribute('generator_aggr'):
             capacity_grid += geno.nominal_capacity
 
         # LV genos
@@ -1600,6 +1661,39 @@ def _import_genos_from_oedb(network):
                                      str(round(capacity_imported - capacity_grid, 1))
                                      )
                              )
+        else:
+            logger.debug('Cumulative capacity of imported generators validated.')
+
+    def _validate_sample_geno_location():
+        if all(generators_res_lv['geom'].notnull()) \
+                and all(generators_res_mv['geom'].notnull()) \
+                and not generators_res_lv['geom'].empty \
+                and not generators_res_mv['geom'].empty:
+            # get geom of 1 random MV and 1 random LV generator and transform
+            sample_mv_geno_geom_shp = transform(proj2equidistant(network),
+                                                wkt_loads(generators_res_mv['geom']
+                                                          .dropna()
+                                                          .sample(n=1)
+                                                          .item())
+                                                )
+            sample_lv_geno_geom_shp = transform(proj2equidistant(network),
+                                                wkt_loads(generators_res_lv['geom']
+                                                          .dropna()
+                                                          .sample(n=1)
+                                                          .item())
+                                                )
+
+            # get geom of MV grid district
+            mvgd_geom_shp = transform(proj2equidistant(network),
+                                      network.mv_grid.grid_district['geom']
+                                      )
+
+            # check if MVGD contains geno
+            if not (mvgd_geom_shp.contains(sample_mv_geno_geom_shp) and
+                        mvgd_geom_shp.contains(sample_lv_geno_geom_shp)):
+                raise ValueError('At least one imported generator is not located '
+                                 'in the MV grid area. Check compatibility of '
+                                 'grid and generator datasets.')
 
     # make DB session
     conn = connection(section=network.config['connection']['section'])
@@ -1657,6 +1751,8 @@ def _import_genos_from_oedb(network):
 
     #generators_mv = generators_conv_mv.append(generators_res_mv)
 
+    _validate_sample_geno_location()
+
     _update_grids(network=network,
                   #generators_mv=generators_mv,
                   generators_mv=generators_res_mv,
@@ -1708,16 +1804,14 @@ def _build_generator_list(network):
     genos_lv = pd.DataFrame(columns=
                             ('id', 'obj'))
     genos_lv_agg = pd.DataFrame(columns=
-                                ('id', 'obj'))
+                                ('la_id', 'id', 'obj'))
 
     # MV genos
     for geno in network.mv_grid.graph.nodes_by_attribute('generator'):
-        name_comp = str(geno.id).split('-')
-        # geno is really MV (not aggregated (originally from aggregated LA))
-        if name_comp[0] != 'agg':
             genos_mv.loc[len(genos_mv)] = [int(geno.id), geno]
-        else:
-            genos_lv_agg.loc[len(genos_lv_agg)] = [geno.id, geno]
+    for geno in network.mv_grid.graph.nodes_by_attribute('generator_aggr'):
+            la_id = int(geno.id.split('-')[1].split('_')[-1])
+            genos_lv_agg.loc[len(genos_lv_agg)] = [la_id, geno.id, geno]
 
     # LV genos
     for lv_grid in network.mv_grid.lv_grids:

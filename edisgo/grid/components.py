@@ -149,12 +149,9 @@ class Load(Component):
         edisgo.network.TimeSeries : Details of global TimeSeries
         """
         if self._timeseries is None:
-            # TODO: replace by correct values (see OEDB) and put to config
-            peak_load_consumption_ratio = {
-                'residential': 0.0025,
-                'retail': 0.0025,
-                'industrial': 0.0025,
-                'agricultural': 0.0025}
+            sector = list(self.consumption.keys())[0]
+            peak_load_consumption_ratio = float(self.grid.network.config['data'][
+                'peakload_consumption_ratio'][sector])
 
             if isinstance(self.grid, MVGrid):
                 q_factor = tan(acos(
@@ -167,7 +164,6 @@ class Load(Component):
                 power_scaling = float(self.grid.network.config['scenario'][
                                           'scale_factor_lv_load'])
 
-            sector = list(self.consumption.keys())[0]
             # TODO: remove this if, once Ding0 data changed to single sector consumption
             if len(list(self.consumption.keys())) > 1:
                 consumption = sum([v for k,v in self.consumption.items()])
@@ -176,10 +172,10 @@ class Load(Component):
 
             timeseries = (self.grid.network.scenario.timeseries.load[sector] *
                           consumption *
-                          peak_load_consumption_ratio[sector]).to_frame('p')
+                          peak_load_consumption_ratio).to_frame('p')
             timeseries['q'] = (self.grid.network.scenario.timeseries.load[sector] *
                                consumption *
-                               peak_load_consumption_ratio[sector] *
+                               peak_load_consumption_ratio *
                                q_factor)
             self._timeseries = timeseries * power_scaling
 
@@ -361,7 +357,7 @@ class MVDisconnectingPoint(Component):
     Attributes
     ----------
     _nodes : tuple
-        Nodes of switch disconnecter line segment
+        Nodes of switch disconnector line segment
     """
 
     def __init__(self, **kwargs):
@@ -390,14 +386,14 @@ class MVDisconnectingPoint(Component):
     @property
     def state(self):
         """
-        Get state of switch disconnecter
+        Get state of switch disconnector
 
         Returns
         -------
         str or None
-            State of MV ring disconnecter: 'open' or 'closed'.
+            State of MV ring disconnector: 'open' or 'closed'.
 
-            Returns `None` if switch disconnecter line segment is not set. This
+            Returns `None` if switch disconnector line segment is not set. This
             refers to an open ring, but it's unknown if the grid topology was
             built correctly.
         """
@@ -406,16 +402,16 @@ class MVDisconnectingPoint(Component):
     @property
     def line(self):
         """
-        Get or set line segment that belongs to the switch disconnecter
+        Get or set line segment that belongs to the switch disconnector
 
         The setter allows only to set the respective line initially. Once the
-        line segment representing the switch disconnecter is set, it cannot be
+        line segment representing the switch disconnector is set, it cannot be
         changed.
 
         Returns
         -------
         Line
-            Line segment that is part of the switch disconnecter model
+            Line segment that is part of the switch disconnector model
         """
         return self._line
 
@@ -444,8 +440,12 @@ class BranchTee(Component):
 
         # set id of BranchTee automatically if not provided
         if not self._id:
-            self._id = max([_.id for _ in
-                            self.grid.graph.nodes_by_attribute('branch_tee')]) + 1
+            ids = [_.id for _ in
+                            self.grid.graph.nodes_by_attribute('branch_tee')]
+            if ids:
+                self._id = max(ids) + 1
+            else:
+                self._id = 1
 
     def __repr__(self):
         return '_'.join([self.__class__.__name__, repr(self.grid), str(self._id)])

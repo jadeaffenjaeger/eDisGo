@@ -1,5 +1,4 @@
 from ..grid.components import Line, MVStation, LVStation, MVDisconnectingPoint, Generator, Load, BranchTee
-from ..grid.tools import select_cable
 from ..tools.geo import calc_geo_dist_vincenty, \
                         calc_geo_lines_in_buffer, \
                         proj2equidistant, \
@@ -49,13 +48,13 @@ def connect_mv_generators(network):
     # get params from config
     buffer_radius = int(network.config['connect']['conn_buffer_radius'])
     buffer_radius_inc = int(network.config['connect']['conn_buffer_radius_inc'])
-    pfac_mv_gen = network.config['scenario']['pfac_mv_gen']
 
     # get standard equipment
     std_line_type = network.equipment_data['MV_cables'].loc[
         network.config['grid_expansion']['std_mv_line']]
 
-    for geno in sorted(network.mv_grid.graph.nodes_by_attribute('generator'), key=lambda _: repr(_)):
+    for geno in sorted(network.mv_grid.graph.nodes_by_attribute('generator'),
+                       key=lambda _: repr(_)):
         if nx.is_isolate(network.mv_grid.graph, geno):
 
             # ===== voltage level 4: generator has to be connected to MV station =====
@@ -85,7 +84,8 @@ def connect_mv_generators(network):
             elif geno.v_level == 5:
 
                 # get branches within a the predefined radius `generator_buffer_radius`
-                branches = calc_geo_lines_in_buffer(node=geno,
+                branches = calc_geo_lines_in_buffer(network=network,
+                                                    node=geno,
                                                     grid=network.mv_grid,
                                                     radius=buffer_radius,
                                                     radius_inc=buffer_radius_inc)
@@ -164,7 +164,7 @@ def connect_lv_generators(network, allow_multiple_genos_per_load=True):
     #                                       'load_count',
     #                                       'geno_count',
     #                                       'more_genos_than_loads')
-                                 )
+    #                             )
 
     # iterate over all LV grids
     for lv_grid in network.mv_grid.lv_grids:
@@ -321,7 +321,7 @@ def connect_lv_generators(network, allow_multiple_genos_per_load=True):
                         )
 
                     line = Line(id=random.randint(10 ** 8, 10 ** 9),
-                                length=1,
+                                length=1e-3,
                                 quantity=1,
                                 kind=std_line_kind,
                                 type=std_line_type,
@@ -370,7 +370,7 @@ def _add_cable_to_equipment_changes(network, line):
             pd.DataFrame(
                 {'iteration_step': [0],
                  'change': ['added'],
-                 'equipment': [line.type],
+                 'equipment': [line.type.name],
                  'quantity': [1]
                  },
                 index=[line]
@@ -412,14 +412,14 @@ def _find_nearest_conn_objects(network, node, branches):
 
     conn_objects_min_stack = []
 
-    node_shp = transform(proj2equidistant(), node.geom)
+    node_shp = transform(proj2equidistant(network), node.geom)
 
     for branch in branches:
         stations = branch['adj_nodes']
 
         # create shapely objects for 2 stations and line between them, transform to equidistant CRS
-        station1_shp = transform(proj2equidistant(), stations[0].geom)
-        station2_shp = transform(proj2equidistant(), stations[1].geom)
+        station1_shp = transform(proj2equidistant(network), stations[0].geom)
+        station2_shp = transform(proj2equidistant(network), stations[1].geom)
         line_shp = LineString([station1_shp, station2_shp])
 
         # create dict with DING0 objects (line & 2 adjacent stations), shapely objects and distances
@@ -496,7 +496,7 @@ def _connect_mv_node(network, node, target_obj):
 
     target_obj_result = None
 
-    node_shp = transform(proj2equidistant(), node.geom)
+    node_shp = transform(proj2equidistant(network), node.geom)
 
     # MV line is nearest connection point
     if isinstance(target_obj['shp'], LineString):
@@ -506,7 +506,7 @@ def _connect_mv_node(network, node, target_obj):
 
         # find nearest point on MV line
         conn_point_shp = target_obj['shp'].interpolate(target_obj['shp'].project(node_shp))
-        conn_point_shp = transform(proj2conformal(), conn_point_shp)
+        conn_point_shp = transform(proj2conformal(network), conn_point_shp)
 
         line = network.mv_grid.graph.edge[adj_node1][adj_node2]
 
