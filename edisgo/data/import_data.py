@@ -2489,8 +2489,8 @@ def _build_mv_grid_from_csv(mv_grids, mv_gen, mv_cb, mv_cd, mv_stations,
             grid=mv_grid,
             mv_grid=mv_grid,
             voltage_op=row['voltage_op'],
-            type=pd.Series(data=[row['x'], row['r'], row['s_nom']],
-                           index=['x', 'r', 's_nom']))
+            type=pd.Series(data=[row['X'], row['R'], row['S_nom']],
+                           index=['X', 'R', 'S_nom']))
         count +=1
 
     mv_station.transformers = list(mvtrafos.values())
@@ -2512,8 +2512,8 @@ def _build_mv_grid_from_csv(mv_grids, mv_gen, mv_cb, mv_cd, mv_stations,
                         geom=wkt_loads(row['geom']),
                         mv_grid=mv_grid,
                         voltage_op=row['voltage_op'],
-                        type=pd.Series(data=[row['x'], row['r'], row['s_nom']],
-                                       index=['x', 'r', 's_nom']),
+                        type=pd.Series(data=[row['X'], row['R'], row['S_nom']],
+                                       index=['X', 'R', 'S_nom']),
                     )}), axis=1)
 
     # Update LV transformer names
@@ -2586,16 +2586,16 @@ def _build_mvlv_lines_from_csv(lvgrids, lvstations, lvtrafos, lvgens, lvloads,
              **mvtrafos, **mvgens, **mvloads, **mvcds, **mv_stations}
 
     # LV lines
-    lv_edges = lines[lines['u_n'] == 0.4]
+    lv_edges = lines[lines['U_n'] == 0.4]
     lv_lines = []
     lv_edges.apply(lambda row: lv_lines.append(
         (nodes[row['node1']], nodes[row['node2']],
          {'line': Line(
              id=row['id'],
-             type=pd.Series(data=[row['type_name'], row['u_n'],
-                                  row['i_max_th'], row['r'], row['l'],
-                                  row['c']],
-                            index=['name', 'u_n', 'i_max_th', 'r', 'l', 'c']),
+             type=pd.Series(data=[row['type_name'], row['U_n'],
+                                  row['I_max_th'], row['R'], row['L'],
+                                  row['C']],
+                            index=['name', 'U_n', 'I_max_th', 'R', 'L', 'C']),
              length=row['length'],
              kind=row['type_kind'],
              grid=lvgrids[row['grid_name']])
@@ -2603,16 +2603,16 @@ def _build_mvlv_lines_from_csv(lvgrids, lvstations, lvtrafos, lvgens, lvloads,
     add_edge_to_grid(lvgrids, lv_lines, 'line')
 
     # MV lines
-    mv_edges = lines[lines['u_n'] >= 10]
+    mv_edges = lines[lines['U_n'] >= 10]
     mv_lines = []
     mv_edges.apply(lambda row: mv_lines.append(
         (nodes[row['node1']], nodes[row['node2']],
          {'line': Line(
              id=row['id'],
-             type=pd.Series(data=[row['type_name'], row['u_n'],
-                                  row['i_max_th'], row['r'], row['l'],
-                                  row['c']],
-                            index=['name', 'u_n', 'i_max_th', 'r', 'l', 'c']),
+             type=pd.Series(data=[row['type_name'], row['U_n'],
+                                  row['I_max_th'], row['R'], row['L'],
+                                  row['C']],
+                            index=['name', 'U_n', 'I_max_th', 'R', 'L', 'C']),
              length=row['length'],
              kind=row['type_kind'],
              grid=mv_grid)
@@ -2625,7 +2625,7 @@ def _build_mvlv_lines_from_csv(lvgrids, lvstations, lvtrafos, lvgens, lvloads,
 
 def _build_aggregated_from_table(generators, mv_grid):
     aggr_line_type = mv_grid.network.equipment_data['mv_cables'].loc[
-        mv_grid.network.equipment_data['mv_cables']['i_max_th'].idxmax()]
+        mv_grid.network.equipment_data['mv_cables']['I_max_th'].idxmax()]
 
     # group generators by voltage level, type, subtype(, and weather cell)
     generators_grp = generators.groupby(
