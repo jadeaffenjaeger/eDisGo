@@ -2625,7 +2625,7 @@ def _build_mvlv_lines_from_csv(lvgrids, lvstations, lvtrafos, lvgens, lvloads,
 
 def _build_aggregated_from_table(generators, mv_grid):
     aggr_line_type = mv_grid.network.equipment_data['mv_cables'].loc[
-        mv_grid.network.equipment_data['mv_cables']['I_max_th'].idxmax()]
+        mv_grid.network.equipment_data['mv_cables']['i_max_th'].idxmax()]
 
     # group generators by voltage level, type, subtype(, and weather cell)
     generators_grp = generators.groupby(
