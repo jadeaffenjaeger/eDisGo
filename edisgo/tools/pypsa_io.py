@@ -111,6 +111,11 @@ def to_pypsa(network, mode, timesteps):
             timeseries_bus_v_set = _pypsa_bus_timeseries(
                 network, components['Bus'].index.tolist(), timesteps=timesteps)
 
+        if len(list(components['ChargingStation'].index.values)) > 0:
+            timeseries_cs_p, timeseries_cs_q = _pypsa_charging_station_timeseries(
+                network,
+                mode=mode)
+
         if len(list(components['StorageUnit'].index.values)) > 0:
             timeseries_storage_p, timeseries_storage_q = \
                 _pypsa_storage_timeseries(
@@ -243,6 +248,7 @@ def mv_to_pypsa(network):
     generators = network.mv_grid.generators
     loads = network.mv_grid.graph.nodes_by_attribute('load')
     branch_tees = network.mv_grid.graph.nodes_by_attribute('branch_tee')
+    charging_stations = network.mv_grid.graph.nodes_by_attribute('charging_station')
     lines = network.mv_grid.graph.lines()
     lv_stations = network.mv_grid.graph.nodes_by_attribute('lv_station')
     mv_stations = network.mv_grid.graph.nodes_by_attribute('mv_station')
@@ -323,6 +329,16 @@ def mv_to_pypsa(network):
         bus['v_nom'].append(lo.grid.voltage_nom)
         bus['x'].append(lo.geom.x)
         bus['y'].append(lo.geom.y)
+
+    # create dataframe representing charging stations
+    for cs in charging_stations:
+        bus_name = '_'.join(['Bus', repr(cs)])
+        load['name'].append(repr(cs))
+        load['bus'].append(bus_name)
+        # charging_station['p_nom'].append(cs.nominal_capacity / 1e3)
+
+        bus['name'].append(bus_name)
+        bus['v_nom'].append(cs.grid.voltage_nom)
 
     # create dataframe for lines
     for l in lines:
@@ -470,6 +486,7 @@ def lv_to_pypsa(network):
     lines = []
     lv_stations = []
     storages = []
+    charging_stations = []
 
     for lv_grid in network.mv_grid.lv_grids:
         generators.extend(lv_grid.generators)
@@ -478,6 +495,7 @@ def lv_to_pypsa(network):
         lines.extend(lv_grid.graph.lines())
         lv_stations.extend(lv_grid.graph.nodes_by_attribute('lv_station'))
         storages.extend(lv_grid.graph.nodes_by_attribute('storage'))
+        charging_stations.extend(lv_grid.graph.nodes_by_attribute('charging_station'))
 
     omega = 2 * pi * 50
 
@@ -540,6 +558,16 @@ def lv_to_pypsa(network):
         bus['v_nom'].append(lo.grid.voltage_nom)
         bus['x'].append(None)
         bus['y'].append(None)
+
+    # create dataframe representing charging stations
+    for cs in charging_stations:
+        bus_name = '_'.join(['Bus', repr(cs)])
+        load['name'].append(repr(cs))
+        load['bus'].append(bus_name)
+        # charging_station['p_nom'].append(cs.nominal_capacity / 1e3)
+
+        bus['name'].append(bus_name)
+        bus['v_nom'].append(cs.grid.voltage_nom)
 
     # create dataframe for lines
     for l in lines:
@@ -737,10 +765,63 @@ def _pypsa_load_timeseries(network, timesteps, mode=None):
                 lv_load_timeseries_p.append(load.pypsa_timeseries('p').rename(
                     repr(load)).to_frame().loc[timesteps])
 
+    charging_station_df_p, charging_station_df_q = \
+        _pypsa_charging_station_timeseries(network, mode=mode)
+
     load_df_p = pd.concat(mv_load_timeseries_p + lv_load_timeseries_p, axis=1)
     load_df_q = pd.concat(mv_load_timeseries_q + lv_load_timeseries_q, axis=1)
 
+    load_df_p = pd.concat([load_df_p, charging_station_df_p], axis=1)
+    load_df_q = pd.concat([load_df_q, charging_station_df_q], axis=1)
+
     return load_df_p, load_df_q
+
+
+def _pypsa_charging_station_timeseries(network, mode=None):
+    """Timeseries in PyPSA compatible format for generator instances
+
+    Parameters
+    ----------
+    network : Network
+        The eDisGo grid topology model overall container
+    mode : str, optional
+        Specifically retrieve generator time series for MV or LV grid level or
+        both. Either choose 'mv' or 'lv'.
+        Defaults to None, which returns both timeseries for MV and LV in a
+        single DataFrame.
+
+    Returns
+    -------
+    :pandas:`pandas.DataFrame<dataframe>`
+        Time series table in PyPSA format
+    """
+
+    mv_charging_station_timeseries_q = []
+    mv_charging_station_timeseries_p = []
+    lv_charging_station_timeseries_q = []
+    lv_charging_station_timeseries_p = []
+
+    # MV generator timeseries
+    if mode is 'mv' or mode is None:
+        for charging_station in network.mv_grid.graph.nodes_by_attribute('charging_station'):
+            mv_charging_station_timeseries_q.append(
+                charging_station.pypsa_timeseries('q').rename(repr(charging_station)).to_frame())
+            mv_charging_station_timeseries_p.append(
+                charging_station.pypsa_timeseries('p').rename(repr(charging_station)).to_frame())
+
+    # LV generator timeseries
+    if mode is 'lv' or mode is None:
+        for lv_grid in network.mv_grid.lv_grids:
+            for charging_station in lv_grid.graph.nodes_by_attribute('charging_station'):
+                lv_charging_station_timeseries_q.append(
+                    charging_station.pypsa_timeseries('q').rename(repr(charging_station)).to_frame())
+                lv_charging_station_timeseries_p.append(
+                    charging_station.pypsa_timeseries('p').rename(repr(charging_station)).to_frame())
+
+    charging_station_df_p = pd.concat(mv_charging_station_timeseries_p + lv_charging_station_timeseries_p, axis=1)
+    charging_station_df_q = pd.concat(mv_charging_station_timeseries_q + lv_charging_station_timeseries_q, axis=1)
+
+    return charging_station_df_p, charging_station_df_q
 
 
 def _pypsa_generator_timeseries(network, timesteps, mode=None):
@@ -1321,7 +1402,8 @@ def process_pfa_results(network, pypsa, timesteps):
         '_'.join(['Bus', l.__repr__('lv')]): repr(l)
         for l in network.mv_grid.graph.nodes_by_attribute('lv_station')}
     loads_names = [repr(lo) for lo in
-                   network.mv_grid.graph.nodes_by_attribute('load')]
+                   network.mv_grid.graph.nodes_by_attribute('load')+
+                   network.mv_grid.graph.nodes_by_attribute('charging_station')]
     loads_mapping = {v: k for k, v in
                      pypsa.loads.loc[loads_names][
                          'bus'].to_dict().items()}
