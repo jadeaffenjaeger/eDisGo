@@ -1,7 +1,8 @@
 from ..grid.components import Load, Generator, BranchTee, MVStation, Line, \
-    Transformer, LVStation, GeneratorFluctuating
+    Transformer, LVStation, GeneratorFluctuating, ChargingStation
 from ..grid.grids import MVGrid, LVGrid
-from ..grid.connect import connect_mv_generators, connect_lv_generators
+from ..grid.connect import connect_mv_generators, \
+    connect_lv_generators, connect_charging_stations
 from ..grid.tools import select_cable, position_switch_disconnectors
 from ..tools.geo import proj2equidistant
 from edisgo.tools import pypsa_io
@@ -1919,6 +1920,180 @@ def _import_genos_from_oedb(network):
 
     connect_mv_generators(network=network)
     connect_lv_generators(network=network)
+
+
+def import_charging_stations(network):
+    """Import charging station data from source.
+
+    The charging station data include
+
+        * nom. capacity
+        * position
+
+    Parameters
+    ----------
+    network: :class:`~.grid.network.Network`
+        The eDisGo container object
+    data_source: :obj:`str`
+        Data source. Supported sources:
+
+            * 'oedb'
+
+    file: :obj:`str`
+        File to import data from, required when using file-based sources.
+
+    Returns
+    -------
+    :pandas:`pandas.DataFrame<dataframe>`
+        List of generators
+    """
+    _import_charging_stations_from_oedb(network)
+
+
+def _import_charging_stations_from_oedb(network):
+    """Import charging station data from the Open Energy Database (OEDB).
+
+    The importer uses SQLAlchemy ORM objects.
+    These are defined in ego.io,
+    see https://github.com/openego/ego.io/tree/dev/egoio/db_tables
+
+    Parameters
+    ----------
+    network: :class:`~.grid.network.Network`
+        The eDisGo container object
+
+    Notes
+    ------
+    Right now only solar and wind generators can be imported.
+
+    """
+
+    def _import_charging_stations():
+        """Import renewable (res) generators
+
+        Returns
+        -------
+        :pandas:`pandas.DataFrame<dataframe>`
+            List of medium-voltage generators
+        :pandas:`pandas.DataFrame<dataframe>`
+            List of low-voltage generators
+
+        Notes
+        -----
+        You can find a full list of columns in
+        :func:`edisgo.data.import_data._update_grids`
+
+        If subtype is not specified it's set to 'unknown'.
+        """
+
+        # build basic query
+        charging_stations_sqla = session.query(
+            orm_charging_station.id,
+            orm_charging_station.subst_id,
+            func.ST_AsText(func.ST_Transform(
+                orm_charging_station.geom, srid)).label('geom')). \
+                filter(orm_charging_station.subst_id == network.mv_grid.id). \
+            filter(orm_charging_station_version)
+
+        charging_stations = pd.read_sql_query(charging_stations_sqla.statement,
+                                          session.bind,
+                                          index_col='id')
+        if not(charging_stations.empty):
+            charging_stations['electrical_capacity'] = 10.0
+
+        return charging_stations
+
+    def _update_grids(network, charging_stations):
+        """
+        Update imported status quo DINGO-grid according to new charging stations
+
+        Parameters
+        ----------
+        network: :class:`~.grid.network.Network`
+            The eDisGo container object
+
+        charging_stations: :pandas:`pandas.DataFrame<dataframe>`
+            List of Charging stations
+            Columns:
+                * id: :obj:`int` (index column)
+                * electrical_capacity: :obj:`float` (unit: kW)
+                * geom: :shapely:`Shapely Point object<points>`
+                  (CRS see config_grid.cfg)
+
+        remove_missing: :obj:`bool`
+            If true, remove generators from grid which are not included in the imported dataset.
+        """
+
+        logger.debug('==> Charging Stations')
+        logger.debug('{} Charging Stations imported.'
+                     .format(str(len(charging_stations))))
+
+        log_charging_station_count = 0
+        log_charging_station_cap = 0
+
+        # iterate over new generators and create them
+        for id, row in charging_stations.iterrows():
+            # create charging station object and add it to MV grid's graph
+            geom = wkt_loads(row['geom'])
+            # geom = wkb_loads(row['geom'], hex=False)
+            network.mv_grid.graph.add_node(
+                ChargingStation(
+                    id=id,
+                    grid=network.mv_grid,
+                    nominal_capacity=row['electrical_capacity'],
+                    v_level=5,
+                    power_factor=1.0,
+                    geom=geom),
+                type='charging_station')
+            log_charging_station_cap += row['electrical_capacity']
+            log_charging_station_count += 1
+
+        logger.debug('{} new charging stations added ({} kW).'
+                     .format(str(log_charging_station_count),
+                             str(round(log_charging_station_cap, 1))
+                             ))
+
+    # make DB session9
+    conn = connection(section=network.config['db_connection']['section'])
+    Session = sessionmaker(bind=conn)
+    session = Session()
+
+    srid = int(network.config['geo']['srid'])
+    scenario = network.charging_station_scenario
+    oedb_data_source = network.config['data_source']['oedb_data_source']
+
+    if oedb_data_source == 'model_draft':
+
+        orm_charging_station_name = network.config['model_draft']['charging_stations_prefix'] + scenario
+
+        # import ORMs
+        orm_charging_station = model_draft.__getattribute__(orm_charging_station_name)
+
+        # set dummy version condition (select all charging stations)
+        orm_charging_station_version = 1 == 1
+
+    elif oedb_data_source == 'versioned':
+
+        # load ORM names
+        # orm_charging_station_name = network.config['versioned']['charging_stations']
+        # data_version = network.config['versioned']['version']
+
+        # import ORMs
+        # orm_charging_station = supply.__getattribute__(orm_charging_station_name)
+
+        # set version condition
+        # orm_charging_station_version = orm_charging_station.version == data_version
+
+        # workaround till versioning
+        orm_charging_station_name = network.config['model_draft']['charging_stations_prefix'] + scenario
+        orm_charging_station = model_draft.__getattribute__(orm_charging_station_name)
+        orm_charging_station_version = 1 == 1
+
+    # get charging stations
+    charging_stations = _import_charging_stations()
+    _update_grids(network=network,
+                  charging_stations=charging_stations)
+    connect_charging_stations(network=network)
 
 
 def _import_genos_from_pypsa(network, file):
