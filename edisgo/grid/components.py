@@ -483,7 +483,7 @@ class ChargingStation(Load):
         """
         if self._timeseries is None:
             timeseries = self.grid.network.timeseries.charging_stations.to_frame('p')
-            timeseries['q'] = timeseries['p'] * tan(acos(self.power_factor))
+            timeseries['q'] = timeseries['p'] * self.q_sign * tan(acos(self.power_factor))
             timeseries = timeseries * self.nominal_capacity
             return timeseries.loc[self.grid.network.timeseries.timeindex, :]
         else:
@@ -506,13 +506,77 @@ class ChargingStation(Load):
         """
         if self._power_factor is None:
             self._power_factor = self.grid.network.config[
-                'reactive_power_factor']['charging_stations']
+                'reactive_power_factor']['charging_station']
 
         return self._power_factor
 
     @power_factor.setter
     def power_factor(self, power_factor):
         self._power_factor = power_factor
+
+    @property
+    def reactive_power_mode(self):
+        """
+        Power factor mode of generator.
+
+        This information is necessary to make the generator behave in an
+        inductive or capacitive manner. Essentially this changes the sign of
+        the reactive power.
+
+        The convention used here in a generator is that:
+        - when `reactive_power_mode` is 'capacitive' then Q is positive
+        - when `reactive_power_mode` is 'inductive' then Q is negative
+
+        In the case that this attribute is not set, it is retrieved from the
+        network config object depending on the voltage level the generator
+        is in.
+
+        Parameters
+        ----------
+        reactive_power_mode : :obj:`str` or None
+            Possible options are 'inductive', 'capacitive' and
+            'not_applicable'. In the case of 'not_applicable' a reactive
+            power time series must be given.
+
+        Returns
+        -------
+        :obj:`str` : Power factor mode
+            In the case that this attribute is not set, it is retrieved from
+            the network config object depending on the voltage level the
+            generator is in.
+
+        """
+        if self._reactive_power_mode is None:
+            self._reactive_power_mode = self.grid.network.config[
+                'reactive_power_mode']['charging_station']
+
+        return self._reactive_power_mode
+
+    @reactive_power_mode.setter
+    def reactive_power_mode(self, reactive_power_mode):
+        self._reactive_power_mode = reactive_power_mode
+
+    @property
+    def q_sign(self):
+        """
+        Get the sign of reactive power based on :attr:`_reactive_power_mode`.
+
+        Returns
+        -------
+        :obj:`int` or None
+            In case of inductive reactive power returns -1 and in case of
+            capacitive reactive power returns +1. If reactive power time
+            series is given, `q_sign` is set to None.
+
+        """
+        if self.reactive_power_mode.lower() == 'inductive':
+            return 1
+        elif self.reactive_power_mode.lower() == 'capacitive':
+            return -1
+        else:
+            raise ValueError("Unknown value {} in reactive_power_mode for "
+                             "Generator {}.".format(self.reactive_power_mode,
+                                                    repr(self)))
 
     def __repr__(self):
         return '_'.join([self.__class__.__name__, str(self._id)])
