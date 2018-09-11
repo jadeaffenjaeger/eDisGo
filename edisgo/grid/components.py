@@ -435,6 +435,89 @@ class Load(Component):
                          str(self.id)])
 
 
+class ChargingStation(Load):
+    """
+    Charging station object
+    -----------------------
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._nominal_capacity = kwargs.get('nominal_capacity', None)
+        self._type = kwargs.get('type', None)
+        self._subtype = kwargs.get('subtype', None)
+        self._v_level = kwargs.get('v_level', None)
+        self._timeseries = kwargs.get('timeseries', None)
+        self._power_factor = kwargs.get('power_factor', None)
+
+    @property
+    def nominal_capacity(self):
+        """:obj:`float` : Nominal generation capacity"""
+        return self._nominal_capacity
+
+    @nominal_capacity.setter
+    def nominal_capacity(self, nominal_capacity):
+        self._nominal_capacity = nominal_capacity
+
+    @property
+    def v_level(self):
+        """:obj:`int` : Voltage level"""
+        return self._v_level
+
+    @property
+    def timeseries(self):
+        """
+        Load time series
+
+        It returns the actual time series used in power flow analysis. If
+        :attr:`_timeseries` is not :obj:`None`, it is returned. Otherwise,
+        :meth:`timeseries()` looks for time series of the according sector in
+        :class:`~.grid.network.TimeSeries` object.
+
+        Returns
+        -------
+        :pandas:`pandas.DataFrame<dataframe>`
+            DataFrame containing active power in kW in column 'p' and
+            reactive power in kVA in column 'q'.
+
+        """
+        if self._timeseries is None:
+            timeseries = self.grid.network.timeseries.charging_stations.to_frame('p')
+            timeseries['q'] = timeseries['p'] * tan(acos(self.power_factor))
+            timeseries = timeseries * self.nominal_capacity
+            return timeseries.loc[self.grid.network.timeseries.timeindex, :]
+        else:
+            return self._timeseries.loc[
+                   self.grid.network.timeseries.timeindex, :]
+
+    @property
+    def power_factor(self):
+        """
+        Power factor of generator
+
+        If power factor is not set it is retrieved from the network config
+        object depending on the grid level the generator is in.
+
+        Returns
+        --------
+        :obj:`float` : Power factor
+            Ratio of real power to apparent power.
+
+        """
+        if self._power_factor is None:
+            self._power_factor = self.grid.network.config[
+                'reactive_power_factor']['charging_stations']
+
+        return self._power_factor
+
+    @power_factor.setter
+    def power_factor(self, power_factor):
+        self._power_factor = power_factor
+
+    def __repr__(self):
+        return '_'.join([self.__class__.__name__, str(self._id)])
+
+
 class Generator(Component):
     """Generator object
 
