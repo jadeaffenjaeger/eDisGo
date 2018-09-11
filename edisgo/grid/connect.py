@@ -1,4 +1,5 @@
-from ..grid.components import Line, MVStation, LVStation, MVDisconnectingPoint, Generator, Load, BranchTee
+from ..grid.components import Line, MVStation, LVStation, MVDisconnectingPoint, \
+    Generator, Load, BranchTee, ChargingStation
 from ..tools.geo import calc_geo_dist_vincenty, \
                         calc_geo_lines_in_buffer, \
                         proj2equidistant, \
@@ -354,6 +355,98 @@ def connect_lv_generators(network, allow_multiple_genos_per_load=True):
         #                                          log_geno_count_vlevel7 > len(lv_loads)]
 
 
+def connect_charging_stations(network):
+    """Connect MV charging stations to existing grids.
+
+    This function searches for unconnected charging stations.
+
+    It connects charging stations of voltage level 4
+            * to HV-MV station
+
+    Parameters
+    ----------
+    network : :class:`~.grid.network.Network`
+        The eDisGo container object
+
+    Notes
+    -----
+    Adapted from `Ding0 <https://github.com/openego/ding0/blob/\
+        21a52048f84ec341fe54e0204ac62228a9e8a32a/\
+        ding0/grid/mv_grid/mv_connect.py#L820>`_.
+    """
+
+    # get params from config
+    buffer_radius = int(network.config[
+                            'grid_connection']['conn_buffer_radius'])
+    buffer_radius_inc = int(network.config[
+                                'grid_connection']['conn_buffer_radius_inc'])
+
+    # get standard equipment
+    std_line_type = network.equipment_data['mv_cables'].loc[
+        network.config['grid_expansion_standard_equipment']['mv_line']]
+
+    for charging_station in sorted(network.mv_grid.graph.nodes_by_attribute('charging_station'),
+                       key=lambda _: repr(_)):
+        if nx.is_isolate(network.mv_grid.graph, charging_station):
+
+            # ===== voltage level 4: generator has to be connected to MV station =====
+            if charging_station.v_level == 4:
+
+                line_length = calc_geo_dist_vincenty(network=network,
+                                                     node_source=charging_station,
+                                                     node_target=network.mv_grid.station)
+
+                line = Line(id=random.randint(10**8, 10**9),
+                            type=std_line_type,
+                            kind='cable',
+                            quantity=1,
+                            length=line_length / 1e3,
+                            grid=network.mv_grid)
+
+                network.mv_grid.graph.add_edge(network.mv_grid.station,
+                                               charging_station,
+                                               line=line,
+                                               type='line')
+
+                # add line to equipment changes to track costs
+                _add_cable_to_equipment_changes(network=network,
+                                                line=line)
+
+            # ===== voltage level 5: generator has to be connected to MV grid (next-neighbor) =====
+            elif charging_station.v_level == 5:
+
+                # get branches within a the predefined radius `generator_buffer_radius`
+                branches = calc_geo_lines_in_buffer(network=network,
+                                                    node=charging_station,
+                                                    grid=network.mv_grid,
+                                                    radius=buffer_radius,
+                                                    radius_inc=buffer_radius_inc)
+
+                # calc distance between generator and grid's lines -> find nearest line
+                conn_objects_min_stack = _find_nearest_conn_objects(network=network,
+                                                                    node=charging_station,
+                                                                    branches=branches)
+
+                # connect!
+                # go through the stack (from nearest to most far connection target object)
+                charging_station_connected = False
+                for dist_min_obj in conn_objects_min_stack:
+                    target_obj_result = _connect_mv_node(network=network,
+                                                         node=charging_station,
+                                                         target_obj=dist_min_obj)
+
+                    if target_obj_result is not None:
+                        charging_station_connected = True
+                        break
+
+                if not charging_station_connected:
+                    logger.debug(
+                        'Charging Station {0} could not be connected, try to '
+                        'increase the parameter `conn_buffer_radius` in '
+                        'config file `config_grid.cfg` to gain more possible '
+                        'connection points.'.format(charging_station))
+
+
 def _add_cable_to_equipment_changes(network, line):
     """Add cable to the equipment changes
 
@@ -628,6 +721,8 @@ def _connect_mv_node(network, node, target_obj):
             valid_conn_objects = (LVStation, BranchTee)
         elif isinstance(node, Generator):
             valid_conn_objects = (LVStation, BranchTee, Generator)
+        elif isinstance(node, ChargingStation):
+            valid_conn_objects = (LVStation, BranchTee, Generator, Load)
         else:
             raise ValueError('Oops, the node you are trying to connect is not a valid connection object')
 
