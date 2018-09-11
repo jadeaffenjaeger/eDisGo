@@ -12,7 +12,8 @@ import edisgo
 from edisgo.tools import config, tools
 from edisgo.tools import pypsa_io_lopf, pypsa_io
 from edisgo.data.import_data import import_from_ding0, import_generators, \
-    import_feedin_timeseries, import_load_timeseries
+    import_feedin_timeseries, import_load_timeseries, import_from_csv, \
+    import_charging_stations
 from edisgo.flex_opt.reinforce_grid import reinforce_grid
 from edisgo.flex_opt import storage_integration, storage_operation, \
     curtailment, storage_positioning
@@ -246,6 +247,8 @@ class EDisGo:
                     'timeseries_generation_reactive_power', None),
                 timeseries_load=kwargs.get(
                     'timeseries_load', None),
+                timeseries_charging_stations=kwargs.get(
+                    'timeseries_charging_stations', None),
                 timeseries_load_reactive_power = kwargs.get(
                     'timeseries_load_reactive_power', None),
                 timeindex=kwargs.get('timeindex', None)).timeseries
@@ -288,6 +291,17 @@ class EDisGo:
             self.network.generator_scenario = generator_scenario
         data_source = 'oedb'
         import_generators(network=self.network, data_source=data_source)
+
+    def import_charging_stations(self, charging_station_scenario=None):
+        """Import charging stations
+
+        For details see
+        :func:`edisgo.data.import_data.import_charging_stations`
+
+        """
+        if charging_station_scenario:
+            self.network.charging_station_scenario = charging_station_scenario
+        import_charging_stations(network=self.network)
 
     def analyze(self, mode=None, timesteps=None):
         """Analyzes the grid by power flow analysis
@@ -1143,6 +1157,14 @@ class TimeSeriesControl:
             if isinstance(ts, pd.DataFrame):
                 self.timeseries.load_reactive_power = ts
 
+            # charging station time series
+            ts = kwargs.get('timeseries_charging_stations', None)
+            if isinstance(ts, pd.Series):
+                self.timeseries.charging_stations = ts
+            else:
+                raise ValueError('Your input for "timeseries_charging_stations" is not '
+                                 'valid.'.format(mode))
+
             # check if time series for the set time index can be obtained
             self._check_timeindex()
 
@@ -1874,6 +1896,7 @@ class TimeSeries:
         self._load = kwargs.get('load', None)
         self._load_reactive_power = kwargs.get('load_reacitve_power', None)
         self._curtailment = kwargs.get('curtailment', None)
+        self._charging_stations = kwargs.get('charging_stations', None)
         self._timeindex = kwargs.get('timeindex', None)
         self._timesteps_load_feedin_case = None
 
@@ -1980,6 +2003,26 @@ class TimeSeries:
     @load_reactive_power.setter
     def load_reactive_power(self, load_reactive_power_timeseries):
         self._load_reactive_power = load_reactive_power_timeseries
+
+    @property
+    def charging_stations(self):
+        """
+        Get load timeseries (only active power)
+
+        Returns
+        -------
+        dict or :pandas:`pandas.DataFrame<dataframe>`
+            See class definition for details.
+
+        """
+        try:
+            return self._charging_stations.loc[self.timeindex]
+        except:
+            return self._charging_stations.loc[self.timeindex]
+
+    @charging_stations.setter
+    def charging_stations(self, charging_stations_timeseries):
+        self._charging_stations = charging_stations_timeseries
 
     @property
     def timeindex(self):
