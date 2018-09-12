@@ -111,10 +111,12 @@ def to_pypsa(network, mode, timesteps):
             timeseries_bus_v_set = _pypsa_bus_timeseries(
                 network, components['Bus'].index.tolist(), timesteps=timesteps)
 
-        if len(list(components['ChargingStation'].index.values)) > 0:
-            timeseries_cs_p, timeseries_cs_q = _pypsa_charging_station_timeseries(
-                network,
-                mode=mode)
+        # This may be useful for future integration but currently
+        # Charging Stations are included in the Loads
+        # if len(list(components['ChargingStation'].index.values)) > 0:
+        #     timeseries_cs_p, timeseries_cs_q = _pypsa_charging_station_timeseries(
+        #         network,
+        #         mode=mode)
 
         if len(list(components['StorageUnit'].index.values)) > 0:
             timeseries_storage_p, timeseries_storage_q = \
@@ -335,10 +337,11 @@ def mv_to_pypsa(network):
         bus_name = '_'.join(['Bus', repr(cs)])
         load['name'].append(repr(cs))
         load['bus'].append(bus_name)
-        # charging_station['p_nom'].append(cs.nominal_capacity / 1e3)
 
         bus['name'].append(bus_name)
         bus['v_nom'].append(cs.grid.voltage_nom)
+        bus['x'].append(cs.geom.x)
+        bus['y'].append(cs.geom.y)
 
     # create dataframe for lines
     for l in lines:
@@ -765,14 +768,15 @@ def _pypsa_load_timeseries(network, timesteps, mode=None):
                 lv_load_timeseries_p.append(load.pypsa_timeseries('p').rename(
                     repr(load)).to_frame().loc[timesteps])
 
-    charging_station_df_p, charging_station_df_q = \
-        _pypsa_charging_station_timeseries(network, mode=mode)
-
     load_df_p = pd.concat(mv_load_timeseries_p + lv_load_timeseries_p, axis=1)
     load_df_q = pd.concat(mv_load_timeseries_q + lv_load_timeseries_q, axis=1)
 
-    load_df_p = pd.concat([load_df_p, charging_station_df_p], axis=1)
-    load_df_q = pd.concat([load_df_q, charging_station_df_q], axis=1)
+    charging_station_df_p, charging_station_df_q = \
+        _pypsa_charging_station_timeseries(network, mode=mode)
+    if charging_station_df_p is not None:
+        load_df_p = pd.concat([load_df_p, charging_station_df_p], axis=1)
+    if charging_station_df_q is not None:
+        load_df_q = pd.concat([load_df_q, charging_station_df_q], axis=1)
 
     return load_df_p, load_df_q
 
@@ -818,8 +822,14 @@ def _pypsa_charging_station_timeseries(network, mode=None):
                 lv_charging_station_timeseries_p.append(
                     charging_station.pypsa_timeseries('p').rename(repr(charging_station)).to_frame())
 
-    charging_station_df_p = pd.concat(mv_charging_station_timeseries_p + lv_charging_station_timeseries_p, axis=1)
-    charging_station_df_q = pd.concat(mv_charging_station_timeseries_q + lv_charging_station_timeseries_q, axis=1)
+    if mv_charging_station_timeseries_p + lv_charging_station_timeseries_p:
+        charging_station_df_p = pd.concat(mv_charging_station_timeseries_p + lv_charging_station_timeseries_p, axis=1)
+    else:
+        charging_station_df_p = None
+    if mv_charging_station_timeseries_q + lv_charging_station_timeseries_q:
+        charging_station_df_q = pd.concat(mv_charging_station_timeseries_q + lv_charging_station_timeseries_q, axis=1)
+    else:
+        charging_station_df_q = None
 
     return charging_station_df_p, charging_station_df_q
 
