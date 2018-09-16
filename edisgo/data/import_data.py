@@ -1948,6 +1948,9 @@ def import_charging_stations(network):
         List of generators
     """
     _import_charging_stations_from_oedb(network)
+    if network.pypsa is not None:
+        pypsa_io.update_pypsa_charging_station_import(network)
+
 
 
 def _import_charging_stations_from_oedb(network):
