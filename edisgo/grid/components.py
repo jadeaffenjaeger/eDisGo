@@ -435,7 +435,7 @@ class Load(Component):
                          str(self.id)])
 
 
-class ChargingStation(Load):
+class ChargingStation(Component):
     """
     Charging station object
     -----------------------
@@ -449,6 +449,8 @@ class ChargingStation(Load):
         self._v_level = kwargs.get('v_level', None)
         self._timeseries = kwargs.get('timeseries', None)
         self._power_factor = kwargs.get('power_factor', None)
+        self._reactive_power_mode = kwargs.get('reactive_power_mode', None)
+        self._q_sign = None
 
     @property
     def nominal_capacity(self):
@@ -489,6 +491,17 @@ class ChargingStation(Load):
         else:
             return self._timeseries.loc[
                    self.grid.network.timeseries.timeindex, :]
+
+    def pypsa_timeseries(self, attr):
+        """Return time series in PyPSA format
+
+        Parameters
+        ----------
+        attr : str
+            Attribute name (PyPSA conventions). Choose from {p_set, q_set}
+        """
+
+        return self.timeseries[attr] / 1e3
 
     @property
     def power_factor(self):
