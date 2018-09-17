@@ -2236,6 +2236,9 @@ def _update_pypsa_timeseries_by_type(network, type, components_to_update=None,
             if type == 'generator':
                 components_to_update = list(itertools.chain(
                     *[grid.generators for grid in grids]))
+            elif type == 'load':
+                components_to_update = list(itertools.chain(
+                    *[grid.loads for grid in grids]))
             else:
                 components_to_update = list(itertools.chain(
                     *[grid.graph.nodes_by_attribute(type) for grid in grids]))
