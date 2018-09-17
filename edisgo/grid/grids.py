@@ -239,9 +239,11 @@ class Grid:
             List of Generator Objects
         """
         if not self._loads:
-            return list(self.graph.nodes_by_attribute('load'))
+            loads = list(self.graph.nodes_by_attribute('load'))
+            loads.extend(list(self.graph.nodes_by_attribute('charging_station')))
+            return loads
         else:
-            pass
+            return self._loads
 
     def __repr__(self):
         return '_'.join([self.__class__.__name__, str(self._id)])
