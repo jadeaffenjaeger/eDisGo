@@ -206,8 +206,8 @@ def oedb(edisgo_object, p_target=None):
         )  # + \
         # generators_conv_mv['capacity'].sum()
 
-        if p_target is not None:
-            capacity_imported = p_target
+        # if p_target is not None:
+        #     capacity_imported = p_target
 
         capacity_grid = edisgo_object.topology.generators_df.p_nom.sum()
 
@@ -343,7 +343,7 @@ def oedb(edisgo_object, p_target=None):
         p_target=p_target
     )
 
-    _validate_generation()
+    # _validate_generation()
 
 
 def add_and_connect_mv_generator(edisgo_object, generator, comp_type="Generator"):
@@ -958,33 +958,50 @@ def update_grids(
         ~imported_generators_lv.index.isin(list(existing_gens.id))
     ]
 
+    final_capacity = {}
     if p_target is not None:
-        # Which part of overall expansion is assigned to MV and LV grid
-        p_mv_percent = (
-            new_gens_mv.electrical_capacity.sum() /
-            (new_gens_mv.electrical_capacity.sum() +
-            new_gens_lv.electrical_capacity.sum())
-        )
-        p_lv_percent = 1 - p_mv_percent
+        def update_imported_gens(layer, imported_gens):
+            def drop_generators(generator_list, gen_type, total_capacity):
+                random.seed(42)
+                while (generator_list[generator_list['generation_type']==gen_type].electrical_capacity.sum() > total_capacity and
+                        len(generator_list[generator_list['generation_type']==gen_type]) > 0):
+                    generator_list.drop(random.choice(generator_list[generator_list['generation_type']==gen_type].index), inplace=True)
 
-        # Calculate amount of required expansion in terms of generation
-        p_mv_total = (p_target - existing_gens.p_nom.sum()) * p_mv_percent
-        p_lv_total = (p_target - existing_gens.p_nom.sum()) * p_lv_percent
+            for gen_type in p_target.keys():
+                # Currently installed capacity
+                existing_capacity = existing_gens[existing_gens.index.isin(layer) & (existing_gens['type']==gen_type).values].p_nom.sum()
+                # installed capacity after NEP2035 expansion
+                expanded_capacity = existing_capacity + imported_gens[imported_gens['generation_type']==gen_type].electrical_capacity.sum()
+                # Total capacity in 2030 scenario as described by expansion factor
+                reduced_expanded_capacity = expanded_capacity * p_target[gen_type]
+                # Amount of required expansion
+                required_expansion = (reduced_expanded_capacity - existing_capacity)
 
-        # Throw away units until we are below expansion threshold
-        while new_gens_mv.electrical_capacity.sum() > p_mv_total:
-            new_gens_mv.drop(random.choice(new_gens_mv.index), inplace=True)
-        # Split resulting error between all remaining units
-        if len(new_gens_mv) > 0:
-            new_gens_mv.electrical_capacity *= p_mv_total / \
-                new_gens_mv.electrical_capacity.sum()
+                # Keep target capcity to scale expanded grid later on
+                if gen_type in final_capacity:
+                    final_capacity[gen_type] += existing_capacity + required_expansion
+                else:
+                    final_capacity[gen_type] = existing_capacity + required_expansion
 
-        # Do the same for LV expansion
-        while new_gens_lv.electrical_capacity.sum() > p_lv_total:
-            new_gens_lv.drop(random.choice(new_gens_lv.index), inplace=True)
-        if len(new_gens_lv) > 0:
-            new_gens_lv.electrical_capacity *= p_lv_total / \
-                new_gens_lv.electrical_capacity.sum()
+                # No generators to be expanded
+                if imported_gens[imported_gens['generation_type']==gen_type].electrical_capacity.sum() == 0:
+                    continue
+                # Reduction in capacity over status quo, so skip all expansion
+                if required_expansion <= 0:
+                    imported_gens.drop(imported_gens[imported_gens['generation_type']==gen_type].index, inplace=True)
+                    continue
+                # More expansion than in NEP2035 required, keep all generators and scale them up later
+                if p_target[gen_type] >= 1:
+                    continue
+
+                # Reduced expansion, remove some generators from expansion
+                drop_generators(imported_gens, gen_type, required_expansion)
+
+        mv_gens = edisgo_object.topology.mv_grid.generators_df.index
+        lv_gens = edisgo_object.topology.generators_df[~edisgo_object.topology.generators_df.index.isin(mv_gens)].index
+
+        update_imported_gens(mv_gens, new_gens_mv)
+        update_imported_gens(lv_gens, new_gens_lv)
 
     # iterate over new generators and create them
     for id in new_gens_mv.index:
@@ -1034,6 +1051,17 @@ def update_grids(
         add_and_connect_lv_generator(
             edisgo_object, new_gens_lv.loc[id, :]
         )
+
+    def scale_generators(gen_type, total_capacity):
+        idx = edisgo_object.topology.generators_df['type'] == gen_type
+        try:
+            edisgo_object.topology.generators_df.loc[idx, 'p_nom'] *= total_capacity/edisgo_object.topology.generators_df[idx].p_nom.sum()
+            print(total_capacity/edisgo_object.topology.generators_df[idx].p_nom.sum())
+        except ZeroDivisionError:
+            pass
+
+    for gen_type, target_capacity in final_capacity.items():
+        scale_generators(gen_type, target_capacity)
 
     log_geno_count = len(new_gens_lv)
     log_geno_cap = new_gens_lv["electrical_capacity"].sum()
