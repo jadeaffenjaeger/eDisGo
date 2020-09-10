@@ -205,9 +205,6 @@ def oedb(edisgo_object, p_target=None):
                 + generators_res_lv["electrical_capacity"].sum()
         )  + generators_conv_mv['electrical_capacity'].sum()
 
-        # if p_target is not None:
-        #     capacity_imported = p_target
-
         capacity_grid = edisgo_object.topology.generators_df.p_nom.sum()
 
         logger.debug(
@@ -1053,14 +1050,18 @@ def update_grids(
 
     def scale_generators(gen_type, total_capacity):
         idx = edisgo_object.topology.generators_df['type'] == gen_type
-        try:
-            edisgo_object.topology.generators_df.loc[idx, 'p_nom'] *= total_capacity/edisgo_object.topology.generators_df[idx].p_nom.sum()
-            print(total_capacity/edisgo_object.topology.generators_df[idx].p_nom.sum())
-        except ZeroDivisionError:
-            pass
+        current_capacity = edisgo_object.topology.generators_df[idx].p_nom.sum()
+        if current_capacity != 0:
+            edisgo_object.topology.generators_df.loc[idx, 'p_nom'] *= total_capacity/current_capacity
 
-    for gen_type, target_capacity in final_capacity.items():
-        scale_generators(gen_type, target_capacity)
+    if p_target is not None:
+        for gen_type, factor in p_target.items():
+            if gen_type in final_capacity:
+                target_capacity = final_capacity[gen_type]
+            else:
+                idx = edisgo_object.topology.generators_df['type'] == gen_type
+                target_capacity = edisgo_object.topology.generators_df[idx].p_nom.sum() * factor
+            scale_generators(gen_type, target_capacity)
 
     log_geno_count = len(new_gens_lv)
     log_geno_cap = new_gens_lv["electrical_capacity"].sum()
